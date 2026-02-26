@@ -1,2 +1,2 @@
-wish: main.c wish.c
-	gcc main.c wish.c -o wish
+wish: main.c wish.c redirection.c
+	gcc main.c wish.c redirection.c -o wish
