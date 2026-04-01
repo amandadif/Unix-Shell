@@ -7,8 +7,8 @@
 #include <sys/wait.h>
 #include <ctype.h>
 #include <fcntl.h>
-#include <unistd.h>
 #include "redirection.h"
+#include "ampersand.h"
 
 #define MAX_COMMAND_LENGTH 100
 #define MAX_ARGUMENTS 10
@@ -20,12 +20,13 @@ int pathCount = 1;
 
 //Forward declaration because it is used in wish()
 int handleBuiltInCommands(int argc, char *argv[]);
+pid_t execute(char *argList[], int start, pid_t *pids, int pidCount, int i);
 
 int wish(int argc, char *argv[], char line[], FILE *a)
 {
   while (1) {
     if (a == stdin) {
-        printf("wish> ");
+      printf("wish> ");
     }
     fflush(stdout);
 
@@ -37,21 +38,20 @@ int wish(int argc, char *argv[], char line[], FILE *a)
     strcpy(line, temp);
     free(temp);
 
+
     // tokenize
     int argCount = 0;
     char *argList[MAX_COMMAND_LENGTH];
     char *token = strtok(line, " \t\n");
     while (token != NULL) {
-        argList[argCount++] = token;
-        token = strtok(NULL, " \t\n");
+      argList[argCount++] = token;
+      token = strtok(NULL, " \t\n");
     }
     argList[argCount] = NULL;
 
     if (argCount == 0) {
       continue;
     }
-    //line = preprocess_redirection(line);
-    //printf("%s\n", line);
 
     int notBuiltIn = handleBuiltInCommands(argCount, argList);
 
@@ -63,116 +63,163 @@ int wish(int argc, char *argv[], char line[], FILE *a)
       }
 
       int validRedirection = checkForValidRedirection(argCount, argList);
-      if(validRedirection == -2) {
+      int amountOfAmpersand = checkForValidAmpersand(argCount, argList);
+      if(validRedirection == -2 || amountOfAmpersand == -100) {
         continue;
       }
 
-      pid_t pid = fork();
 
-      if (pid == 0) {
-        //child
-        if(validRedirection != -1 && validRedirection != -2) {
-          int fd = open(argList[validRedirection + 1],
-                          O_WRONLY | O_CREAT | O_TRUNC, 0644);
-          if(fd < 0) {
-            perror("open");
-            exit(1);
+      int start = 0;
+      pid_t pids[MAX_COMMAND_LENGTH];
+      int pidCount = 0;
+
+      for (int i = 0; i <= argCount; i++) {
+
+        int isAmpersand = 0;
+
+        //detect &
+        if (i < argCount && argList[i] && strcmp(argList[i], "&") == 0) {
+          isAmpersand = 1;
+        }
+
+
+        if (i == argCount || isAmpersand) {
+
+          if (argList[start] == NULL) {
+            start = i + 1;
+            continue;
           }
-          dup2(fd, STDOUT_FILENO);
-          dup2(fd, STDERR_FILENO);
-          close(fd);
-          argList[validRedirection] = NULL;
+
+          if (isAmpersand) {
+            argList[i] = NULL;
+          }
+          pid_t pid = execute(argList, start, pids, pidCount, i);
+          if (pid > 0) {
+            if (!isAmpersand) {
+              wait(NULL);
+            }
+            else {
+              pids[pidCount++] = pid;
+            }
+          }
+          else {
+            fprintf(stderr, "An error has occurred\n");
+          }
+
+          start = i + 1;
+
         }
-
-        for (int i = 0; i < pathCount; i++) {
-          char fullpath[256];
-          snprintf(
-            fullpath,
-            sizeof(fullpath),
-            "%s/%s",
-            pathList[i],
-            argList[0]
-          );
-          execv(fullpath, argList);
-        }
-
-        //execv failed
-        fprintf(stderr, "An error has occurred\n");
-        exit(1);
-
       }
-      else if (pid > 0) {
+
+      //wait for all background processes
+      for (int i = 0; i < pidCount; i++) {
         wait(NULL);
       }
-      else {
-        fprintf(stderr, "An error has occurred\n");
-      }
+
+
     }
   }
   return 0;
 }
+
 int handleBuiltInCommands(int argc, char *argv[]) {
-    //exit
-    if (argc == 0) {
-        return 0;
-    }
-    if (strcmp(argv[0], "exit") == 0) {
-        if (argc != 1) {
-            fprintf(stderr, "An error has occurred\n");
-            return 0;
-        }
-        exit(0);
-    }
-
-    //cd
-    if (strcmp(argv[0], "cd") == 0) {
-        if (argc != 2) {
-            fprintf(stderr, "An error has occurred\n");
-            return 0;
-        }
-        if (chdir(argv[1]) != 0) {
-           fprintf(stderr, "An error has occurred\n");
-        }
-        return 0;   // built‑in handled
-    }
-
-    //path
-    if (strcmp(argv[0], "path") == 0) {
-
-      //reset path to 0
-      pathCount = 0;
-
-      //new path
-      for (int i = 1; i < argc; i++) {
-        pathList[pathCount] = strdup(argv[i]);
-        pathCount++;
-      }
-
+  //exit
+  if (argc == 0) {
+    return 0;
+  }
+  if (strcmp(argv[0], "exit") == 0) {
+    if (argc != 1) {
+      fprintf(stderr, "An error has occurred\n");
       return 0;
     }
+    exit(0);
+  }
 
-    //No built in command found
-    return 1;
+  //cd
+  if (strcmp(argv[0], "cd") == 0) {
+    if (argc != 2) {
+      fprintf(stderr, "An error has occurred\n");
+      return 0;
+    }
+    if (chdir(argv[1]) != 0) {
+      fprintf(stderr, "An error has occurred\n");
+    }
+    return 0;   // built‑in handled
+  }
+
+  //path
+  if (strcmp(argv[0], "path") == 0) {
+
+    //reset path to 0
+    pathCount = 0;
+
+    //new path
+    for (int i = 1; i < argc; i++) {
+      pathList[pathCount] = strdup(argv[i]);
+      pathCount++;
+    }
+
+    return 0;
+  }
+
+  //No built in command found
+  return 1;
 }
 
 FILE* performFileLogic(int argc, char *argv[]) {
-    FILE *a = stdin;
+  FILE *a = stdin;
 
-    //batch
-    if (argc == 2) {
-        a = fopen(argv[1], "r");
-        if (a == NULL) {
-            char error_message[] = "An error has occurred\n";
-            write(STDERR_FILENO, error_message, 22);
-            exit(1);  // MUST exit
+  //batch
+  if (argc == 2) {
+    a = fopen(argv[1], "r");
+    if (a == NULL) {
+      char error_message[] = "An error has occurred\n";
+      write(STDERR_FILENO, error_message, 22);
+      exit(1);  // MUST exit
+    }
+  }
+  //too many arguments
+  else if (argc > 2) {
+    char error_message[] = "An error has occurred\n";
+    write(STDERR_FILENO, error_message, 22);
+    exit(1);
+  }
+
+  return a;  //stdin if argc == 1, or first file if argc == 2
+}
+
+pid_t execute(char *argList[], int start, pid_t *pids, int pidCount, int i) {
+
+  pid_t pid = fork();
+
+  if (pid == 0) {
+    //redirection
+    for (int k = start; k < i; k++) {
+      if (argList[k] && strcmp(argList[k], ">") == 0) {
+        int fd = open(argList[k + 1],
+            O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd < 0) {
+          fprintf(stderr, "An error has occurred\n");
+          exit(1);
         }
+
+        dup2(fd, STDOUT_FILENO);
+        dup2(fd, STDERR_FILENO);
+        close(fd);
+
+        argList[k] = NULL;
+        break;
+      }
     }
-    //too many arguments
-    else if (argc > 2) {
-        char error_message[] = "An error has occurred\n";
-        write(STDERR_FILENO, error_message, 22);
-        exit(1);
+    for (int j = 0; j < pathCount; j++) {
+      char fullpath[256];
+      snprintf(fullpath, sizeof(fullpath),
+          "%s/%s", pathList[j], argList[start]);
+      execv(fullpath, &argList[start]);
     }
 
-    return a;  //stdin if argc == 1, or first file if argc == 2
+    fprintf(stderr, "An error has occurred\n");
+    exit(1);
+  }
+  return pid;
 }
